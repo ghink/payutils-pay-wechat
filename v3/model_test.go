@@ -44,3 +44,22 @@ func TestFormatTime(t *testing.T) {
 		t.Errorf("FormatTime = %v (UTC %v), want %v", got, got.UTC(), wantUTC)
 	}
 }
+
+func TestMapRefundState(t *testing.T) {
+	cases := []struct {
+		in   string
+		want model.RefundState
+	}{
+		{RefundStateSuccess, model.RefundStateSuccess},
+		{RefundStateProcessing, model.RefundStateProcessing},
+		{RefundStateClosed, model.RefundStateClosed},
+		{RefundStateAbnormal, model.RefundStateAbnormal},
+		{"SOMETHING_ELSE", model.RefundStateUnknown},
+		{"", model.RefundStateUnknown},
+	}
+	for _, c := range cases {
+		if got := MapRefundState(c.in); got != c.want {
+			t.Errorf("MapRefundState(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

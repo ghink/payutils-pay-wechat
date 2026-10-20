@@ -5,9 +5,11 @@ import (
 	"strings"
 
 	"github.com/go-pay/gopay"
+	"github.com/go-pay/gopay/wechat/v3"
 
 	"go.gh.ink/payutils/v3/errors"
 	"go.gh.ink/payutils/v3/model"
+	"go.gh.ink/payutils/v3/router"
 )
 
 func (c Client) Status(tradeID string) (model.ReturnStatus, error) {
@@ -39,6 +41,8 @@ func (c Client) Status(tradeID string) (model.ReturnStatus, error) {
 		TradeStatus: MapState(wxRsp.Response.TradeState),
 		Upstream:    Name,
 		Time:        FormatTime(wxRsp.Response.SuccessTime),
+		// WeChat's own order number, only present once the trade actually paid.
+		ChannelTxnID: wxRsp.Response.TransactionId,
 	}, nil
 }
 
@@ -68,10 +72,15 @@ func (c Client) Close(tradeID string) error {
 	return nil
 }
 
-func (c Client) Refund(tradeID string, curr string, refundID string, totalAmount int64, refundAmount int64, reason string) error {
+// Refund issues a refund. WeChat accepts the request and settles it
+// asynchronously, so a nil error only means the refund was taken: the reported
+// State is what tells whether the money has actually moved.
+func (c Client) Refund(
+	tradeID string, curr string, refundID string, totalAmount int64, refundAmount int64, reason string,
+) (model.RefundResult, error) {
 	outTradeNo := strings.Join([]string{c.Params.TradeIDPrefix, tradeID, c.Params.TradeIDSuffix}, "")
 	outRefundNo := strings.Join([]string{c.Params.TradeIDPrefix, refundID, c.Params.TradeIDSuffix}, "")
-	notifyURL := strings.Join([]string{c.Params.Endpoint, "/", Name, "/callback"}, "")
+	notifyURL := router.Notify(c.Params.Endpoint, Name)
 
 	bm := make(gopay.BodyMap)
 	bm.Set("out_trade_no", outTradeNo).
@@ -86,23 +95,80 @@ func (c Client) Refund(tradeID string, curr string, refundID string, totalAmount
 
 	wxRsp, err := c.Client.V3Refund(context.Background(), bm)
 	if err != nil {
-		return err
+		return model.RefundResult{}, err
 	}
 
 	if wxRsp.Code != 0 && wxRsp.Code != 404 {
-		return ErrWeChatPayRespCodeInvalid.
+		return model.RefundResult{}, ErrWeChatPayRespCodeInvalid.
 			WithUpstreamName(Name).
 			WithUpstreamCode(wxRsp.ErrResponse.Code).
 			WithUpstreamMessage(wxRsp.ErrResponse.Message).
 			WithUpstreamResponse(wxRsp)
 	}
 	if wxRsp.Code == 404 {
-		return errors.ErrTradeNotExist.
+		return model.RefundResult{}, errors.ErrTradeNotExist.
 			WithUpstreamName(Name).
 			WithUpstreamCode(wxRsp.ErrResponse.Code).
 			WithUpstreamMessage(wxRsp.ErrResponse.Message).
 			WithUpstreamResponse(wxRsp)
 	}
 
-	return nil
+	return refundResult(
+		wxRsp.Response.OutTradeNo, wxRsp.Response.RefundId,
+		wxRsp.Response.Status, wxRsp.Response.SuccessTime, wxRsp.Response.Amount,
+	), nil
+}
+
+// QueryRefund looks a refund up by our own refund number.
+func (c Client) QueryRefund(tradeID string, refundID string) (model.RefundResult, error) {
+	outRefundNo := strings.Join([]string{c.Params.TradeIDPrefix, refundID, c.Params.TradeIDSuffix}, "")
+
+	wxRsp, err := c.Client.V3RefundQuery(context.Background(), outRefundNo, nil)
+	if err != nil {
+		return model.RefundResult{}, err
+	}
+
+	if wxRsp.Code != 0 && wxRsp.Code != 404 {
+		return model.RefundResult{}, ErrWeChatPayRespCodeInvalid.
+			WithUpstreamName(Name).
+			WithUpstreamCode(wxRsp.ErrResponse.Code).
+			WithUpstreamMessage(wxRsp.ErrResponse.Message).
+			WithUpstreamResponse(wxRsp)
+	}
+	if wxRsp.Code == 404 {
+		return model.RefundResult{}, errors.ErrRefundNotExist.
+			WithUpstreamName(Name).
+			WithUpstreamCode(wxRsp.ErrResponse.Code).
+			WithUpstreamMessage(wxRsp.ErrResponse.Message).
+			WithUpstreamResponse(wxRsp)
+	}
+
+	// tradeID is not echoed by this endpoint; the refund number is what identifies
+	// the refund unambiguously, so the caller-side trade id comes back as reported.
+	return refundResult(
+		wxRsp.Response.OutTradeNo, wxRsp.Response.RefundId,
+		wxRsp.Response.Status, wxRsp.Response.SuccessTime, wxRsp.Response.Amount,
+	), nil
+}
+
+// refundResult folds a WeChat refund payload into the framework result. The
+// refund and the refund-query responses carry the same fields.
+func refundResult(
+	outTradeNo, channelRefundID, status, successTime string, amount *wechat.RefundOrderAmount,
+) model.RefundResult {
+	result := model.RefundResult{
+		State:           MapRefundState(status),
+		TradeID:         outTradeNo,
+		ChannelRefundID: channelRefundID,
+		SuccessTime:     FormatTime(successTime),
+	}
+
+	// A nil amount means WeChat did not report one, which is different from a
+	// refund of zero; leave the amount empty rather than inventing one.
+	if amount != nil {
+		result.RefundAmount = int64(amount.Refund)
+		result.Currency = amount.Currency
+	}
+
+	return result
 }

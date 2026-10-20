@@ -3,6 +3,8 @@ package paywechat
 import (
 	"time"
 
+	"github.com/go-pay/gopay/wechat/v3"
+
 	"go.gh.ink/payutils/v3/model"
 )
 
@@ -36,6 +38,31 @@ func MapState(state string) model.TradeState {
 		return model.TradeStateUnknown
 	}
 	return internalState
+}
+
+// EventTypeRefundPrefix marks a notification as a refund result instead of a
+// payment result: WeChat sends REFUND.SUCCESS, REFUND.ABNORMAL and REFUND.CLOSED.
+const EventTypeRefundPrefix = "REFUND."
+
+// WeChat refund states, as reported by the status field of a refund payload.
+const (
+	RefundStateSuccess    string = "SUCCESS"
+	RefundStateClosed     string = "CLOSED"
+	RefundStateProcessing string = "PROCESSING"
+	RefundStateAbnormal   string = "ABNORMAL"
+)
+
+// RefundStateMap maps a WeChat refund state onto the internal refund state.
+var RefundStateMap = map[string]model.RefundState{
+	RefundStateSuccess:    model.RefundStateSuccess,
+	RefundStateClosed:     model.RefundStateClosed,
+	RefundStateProcessing: model.RefundStateProcessing,
+	RefundStateAbnormal:   model.RefundStateAbnormal,
+}
+
+// MapRefundState maps a WeChat refund state (string) to the internal refund state.
+func MapRefundState(state string) model.RefundState {
+	return model.MapRefundState(RefundStateMap, state)
 }
 
 // FormatTime parses a WeChat RFC3339 time string into time.Time.
@@ -102,4 +129,23 @@ type PayerInfo struct {
 
 type SceneInfo struct {
 	DeviceID string `json:"device_id"`
+}
+
+// WeChatRefundCallback is the decrypted body of an asynchronous refund
+// notification (event_type REFUND.*).
+//
+// The amount block reuses gopay's refund amount struct: the notification carries
+// the same fields as the refund response, so one type covers both and a refund
+// result can be built the same way from either.
+type WeChatRefundCallback struct {
+	RefundID            string                    `json:"refund_id"`
+	OutRefundNo         string                    `json:"out_refund_no"`
+	TransactionID       string                    `json:"transaction_id"`
+	OutTradeNo          string                    `json:"out_trade_no"`
+	UserReceivedAccount string                    `json:"user_received_account"`
+	SuccessTime         string                    `json:"success_time"`
+	CreateTime          string                    `json:"create_time"`
+	Status              string                    `json:"status"`
+	FundsAccount        string                    `json:"funds_account"`
+	Amount              *wechat.RefundOrderAmount `json:"amount"`
 }
